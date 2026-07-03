@@ -66,8 +66,8 @@ def save_json(path, data):
 
 
 def compute_ss_score(klines, idx):
-    """简化版 SS 评分（技术面+资金面）"""
-    if idx < 60: return {"tech": 50, "capital": 50, "info": 50, "total": 50}
+    """SS 评分 + 因子明细"""
+    if idx < 60: return {"tech": 50, "capital": 50, "info": 50, "total": 50, "factors": []}
 
     w = klines[:idx+1]
     c = [k['close'] for k in w]
@@ -76,35 +76,49 @@ def compute_ss_score(klines, idx):
     l = [k['low'] for k in w]
 
     tech = 50; capital = 50
+    factors = []  # [(dim, name, delta, detail)]
+
+    def add(dim, name, delta, detail=""):
+        factors.append((dim, name, delta, detail))
 
     ma5, ma10, ma20 = calc_ma(c, 5), calc_ma(c, 10), calc_ma(c, 20)
     rsi = calc_rsi(c)
     dif, dea = calc_ema(c, 12), calc_ema(c, 26)
 
-    # 技术面
     if ma5 and ma10 and ma20:
-        if ma5 > ma10 > ma20: tech += 15
-        elif ma5 < ma10 < ma20: tech -= 10
-    if dif and dea and dif > dea and dif > 0: tech += 5
-    if 40 <= rsi <= 55: tech -= 3
-    if rsi > 80: tech += 12
-    elif rsi > 75: tech += 10
+        if ma5 > ma10 > ma20:
+            tech += 15
+            add("技术面", "均线多头排列", 15, f"MA5({ma5:.1f})>MA10({ma10:.1f})>MA20({ma20:.1f})")
+        elif ma5 < ma10 < ma20:
+            tech -= 10
+            add("技术面", "均线空头排列", -10, f"MA5({ma5:.1f})<MA10({ma10:.1f})<MA20({ma20:.1f})")
+    if dif and dea and dif > dea and dif > 0:
+        add("技术面", "MACD金叉多头", 5, f"DIF({dif:.2f})>DEA")
+        tech += 5
+    if 40 <= rsi <= 55:
+        tech -= 3; add("技术面", "RSI弱势区", -3, f"RSI={rsi:.1f}")
+    if rsi > 80:
+        tech += 12; add("技术面", "RSI极端强势", 12, f"RSI={rsi:.1f}")
+    elif rsi > 75:
+        tech += 10; add("技术面", "RSI强动量", 10, f"RSI={rsi:.1f}")
 
-    # 资金面
     if len(c) >= 20:
         mf_mult = [(c[i] - l[i] - (h[i] - c[i])) / (h[i] - l[i]) if h[i] != l[i] else 0.0
                    for i in range(-20, 0)]
         mf_vol = [m * v[i] for m, i in zip(mf_mult, range(-20, 0))]
         cmf = sum(mf_vol) / sum(v[-20:]) if sum(v[-20:]) > 0 else 0
-        if cmf > 0.1: capital += 8
-        elif cmf > 0: capital += 3
-        elif cmf < -0.1: capital -= 8
+        if cmf > 0.1:
+            capital += 8; add("资金面", "CMF强流入", 8, f"CMF={cmf:.2f}")
+        elif cmf > 0:
+            capital += 3; add("资金面", "CMF微流入", 3, f"CMF={cmf:.2f}")
+        elif cmf < -0.1:
+            capital -= 8; add("资金面", "CMF持续流出", -8, f"CMF={cmf:.2f}")
 
     tech = max(5, min(95, tech))
     capital = max(5, min(95, capital))
     total = tech * 0.35 + capital * 0.55 + 50 * 0.10
 
-    return {"tech": tech, "capital": capital, "info": 50, "total": round(total)}
+    return {"tech": tech, "capital": capital, "info": 50, "total": round(total), "factors": factors}
 
 
 def extract_indicators(klines, idx, extra=None):
@@ -244,26 +258,38 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         ret10_cls = "red" if ind.get("ret_10d", 0) > 0 else "green"
         ret20_cls = "red" if ind.get("ret_20d", 0) > 0 else "green"
         hl = ' class="hl"' if r["rank_pct"] < 0.15 else ""
-        rsi_v = ind.get("rsi", 50)
-        rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#666"))
-        # Store rank_delta for context-aware change display
-        delta = (rank_change.get(code, "●") != "●")
-        prev_rp = r.get("prev_rank_pct", 0)
 
-        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank_pct"]:.3f}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-prevrp="{prev_rp:.4f}" data-code="{r["code"]}" data-name="{r["name"]}">'
+        did = f"d{code}"
+        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank_pct"]:.3f}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-code="{r["code"]}" data-name="{r["name"]}" style="cursor:pointer" onclick="toggleDetail(\'{did}\')">'
         table_rows += f'<td>{r["code"]}</td><td>{r["name"]}</td><td class="sector-cell">{r["sector"]}</td>'
         table_rows += f'<td class="rank-cell"><b>top {r["rank_pct"]:.1%}</b> <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
-        table_rows += f'<td>{ss.get("total", "-")}</td>'
+        table_rows += f'<td><b>{ss.get("total", "-")}</b></td>'
         table_rows += f'<td>{r["price"]:.2f}</td>'
         table_rows += f'<td class="{chg_cls}">{r["change_pct"]:+.2f}%</td>'
-        table_rows += f'<td><span style="color:{rsi_c};font-weight:600">{rsi_v:.0f}</span></td>'
-        table_rows += f'<td>{ind.get("vol_ratio", "-")}</td>'
         table_rows += f'<td class="{ret5_cls}">{ind.get("ret_5d", 0):+.1f}%</td>'
         table_rows += f'<td class="{ret10_cls}">{ind.get("ret_10d", 0):+.1f}%</td>'
         table_rows += f'<td class="{ret20_cls}">{ind.get("ret_20d", 0):+.1f}%</td>'
-        table_rows += f'<td>{ind.get("dev_ma20", 0):+.1f}%</td>'
-        table_rows += f'<td>{ind.get("pe", "-")}</td>'
         table_rows += f'</tr>\n'
+
+        # 详情行
+        factors = ss.get("factors", [])
+        pos_f = [f for f in factors if f[2] > 0]
+        neg_f = [f for f in factors if f[2] < 0]
+        rsi_v = ind.get("rsi", 50)
+        rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#555"))
+        detail = f'<tr id="{did}" class="detail-row" style="display:none"><td colspan="10" style="padding:10px 16px;background:#f8f9fc;border-bottom:2px solid #e0e0e0;font-size:12px">'
+        detail += f'<div style="display:flex;gap:24px;flex-wrap:wrap">'
+        detail += f'<div><b>SS评分明细</b><br>技术面 <b>{ss.get("tech",50)}</b> &nbsp; 资金面 <b>{ss.get("capital",50)}</b> &nbsp; 信息面 <b>{ss.get("info",50)}</b></div>'
+        detail += f'<div><b>技术指标</b><br>RSI <b style="color:{rsi_c}">{rsi_v:.0f}</b> &nbsp; 量比 <b>{ind.get("vol_ratio","-")}</b> &nbsp; MA20偏离 <b>{ind.get("dev_ma20",0):+.1f}%</b> &nbsp; PE <b>{ind.get("pe","-")}</b></div>'
+        detail += f'</div>'
+        if pos_f:
+            detail += '<div style="margin-top:6px"><span style="color:#166534;font-weight:600">🟢</span> ' + ' '.join(f'<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#dcfce7;border-radius:4px">{f[1]}+{f[2]}</span>' for f in pos_f) + '</div>'
+        if neg_f:
+            detail += '<div style="margin-top:3px"><span style="color:#991b1b;font-weight:600">🔴</span> ' + ' '.join(f'<span style="display:inline-block;margin:2px 4px;padding:2px 8px;background:#fee2e2;border-radius:4px">{f[1]}{f[2]}</span>' for f in neg_f) + '</div>'
+        if not pos_f and not neg_f:
+            detail += '<div style="margin-top:4px;color:#999">无显著加减分因子触发</div>'
+        detail += '</td></tr>'
+        table_rows += detail + '\n'
 
     # ====== 板块热力 ======
     sector_html = '<div class="card"><h3>板块热力</h3><div class="sector-grid">'
@@ -329,9 +355,14 @@ tr.hl:hover{{background:#fef3c7}}
 .red{{color:#d32f2f}}.green{{color:#2e7d32}}.purple{{color:#7c3aed}}.dim{{color:#999}}
 .footer{{text-align:center;padding:10px;font-size:10px;color:#aaa}}
 .rank-cell{{min-width:70px}}
+.detail-row{{transition:all .2s}}
 </style>
 <script>
 var currentSector='all';
+function toggleDetail(id){{
+var el=document.getElementById(id);
+if(el)el.style.display=el.style.display==='none'?'':'none';
+}}
 function filterSector(sector,el,fromCard){{
 currentSector=sector;
 document.querySelectorAll('.sector-tag').forEach(t=>t.classList.remove('active'));
@@ -417,7 +448,7 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 <th onclick="sortTable(3)">ICIR排名</th>
 <th onclick="sortTable(4)">SS分</th>
 <th>收盘价</th><th>日涨跌</th>
-<th>RSI</th><th>量比</th><th>5日涨跌</th><th>10日涨跌</th><th>20日涨跌</th><th>MA20偏离</th><th>PE</th>
+<th>收盘价</th><th>日涨跌</th><th>5日涨跌</th><th>10日涨跌</th><th>20日涨跌</th>
 </tr></thead><tbody>{table_rows}</tbody></table>
 </div></div>
 <div class="change-panel" id="changePanel"></div>
