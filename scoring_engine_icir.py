@@ -54,6 +54,7 @@ ICIR = {k: v/_total for k, v in ICIR_W.items()}
 
 HISTORY_FILE = os.path.join(PROJECT_DIR, "output", "icir_signal_history.json")
 RANK_FILE = os.path.join(PROJECT_DIR, "output", "icir_rank_history.json")
+BUY_COUNT = 30  # 买入阈值：前30名
 
 def load_json(path):
     if os.path.exists(path):
@@ -178,12 +179,13 @@ def send_email(html_path, today, recipient="914110627@qq.com"):
 
 # ========== HTML 报告 ==========
 def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, holdings, watch_list,
-               rank_risers, rank_fallers, sector_stats, rank_change):
+               rank_risers, rank_fallers, sector_stats, rank_change, rank_history):
     """构建完整 HTML 报告"""
 
     n = len(results)
-    top10 = len([k for k in sorted_keys[:max(1,int(n*0.1))]])
-    top15 = len([k for k in sorted_keys[:max(1,int(n*0.15))]])
+    buy_count = BUY_COUNT
+    top10_cnt = len(sorted_keys[:max(1,int(n*0.1))])
+    top15_cnt = len(sorted_keys[:max(1,int(n*0.15))])
 
     # ====== 信号面板 ======
     signal_html = ""
@@ -216,8 +218,8 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     # ====== 仪表盘 ======
     dashboard = f"""
     <div class="dash">
-    <div class="dcard"><div class="dv" style="color:#7c3aed">{top10}</div><div class="dl">top 10%</div></div>
-    <div class="dcard"><div class="dv" style="color:#1565c0">{top15}</div><div class="dl">top 15%</div></div>
+    <div class="dcard"><div class="dv" style="color:#7c3aed">{top10_cnt}</div><div class="dl">前10%</div></div>
+    <div class="dcard"><div class="dv" style="color:#1565c0">{top15_cnt}</div><div class="dl">前15%</div></div>
     <div class="dcard"><div class="dv" style="color:#d32f2f">{len(sell_alerts)}</div><div class="dl">卖出信号</div></div>
     <div class="dcard"><div class="dv" style="color:#2e7d32">{len(new_buys)}</div><div class="dl">新信号</div></div>
     <div class="dcard"><div class="dv">{len(holdings)}</div><div class="dl">持仓</div></div>
@@ -236,9 +238,9 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     <div class="sector-tags">{sector_tags}</div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
     <select id="rankFilter" onchange="applyFilters()">
-        <option value="all">全部排名</option><option value="top10">top 10%</option>
-        <option value="top15">top 15%</option><option value="top30">top 30%</option>
-        <option value="top50">top 50%</option></select>
+        <option value="all">全部排名</option><option value="top10">前30</option>
+        <option value="top15">前60</option><option value="top30">前130</option>
+        <option value="top50">前220</option></select>
     <select id="changeFilter" onchange="applyFilters()">
         <option value="all">全部涨跌</option><option value="up">上涨</option><option value="down">下跌</option></select>
     <input type="text" id="searchBox" placeholder="搜索代码/名称..." oninput="applyFilters()" style="padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;width:140px">
@@ -257,12 +259,12 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         ret5_cls = "red" if ind.get("ret_5d", 0) > 0 else "green"
         ret10_cls = "red" if ind.get("ret_10d", 0) > 0 else "green"
         ret20_cls = "red" if ind.get("ret_20d", 0) > 0 else "green"
-        hl = ' class="hl"' if r["rank_pct"] < 0.15 else ""
+        hl = ' class="hl"' if r["rank"] <= BUY_COUNT else ""
 
         did = f"d{code}"
-        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank_pct"]:.3f}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-code="{r["code"]}" data-name="{r["name"]}" style="cursor:pointer" onclick="toggleDetail(\'{did}\')">'
+        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank"]}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-code="{r["code"]}" data-name="{r["name"]}" style="cursor:pointer" onclick="toggleDetail(\'{did}\')">'
         table_rows += f'<td>{r["code"]}</td><td>{r["name"]}</td><td class="sector-cell">{r["sector"]}</td>'
-        table_rows += f'<td class="rank-cell"><b>top {r["rank_pct"]:.1%}</b> <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
+        table_rows += f'<td class="rank-cell"><b># {r["rank"]}</b> <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
         table_rows += f'<td><b>{ss.get("total", "-")}</b></td>'
         table_rows += f'<td>{r["price"]:.2f}</td>'
         table_rows += f'<td class="{chg_cls}">{r["change_pct"]:+.2f}%</td>'
@@ -279,6 +281,18 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#555"))
 
         detail = f'<tr id="{did}" class="detail-row" style="display:none"><td colspan="10" style="padding:12px 18px;background:#f8f9fc;border-bottom:2px solid #e0e0e0;font-size:12px">'
+
+        # ---- 排名趋势 ----
+        rh = rank_history.get(code, [r["rank"]])
+        if len(rh) >= 2:
+            trend_parts = []
+            for i, rk in enumerate(rh[-5:]):
+                if i == len(rh[-5:]) - 1:
+                    trend_parts.append(f'<b style="color:#7c3aed;font-size:13px">#{rk}</b>')
+                else:
+                    trend_parts.append(f'<span style="color:#999">#{rk}</span>')
+            trend_str = ' → '.join(trend_parts)
+            detail += f'<div style="margin-bottom:10px;font-size:12px"><b>📈 近5日排名</b> {trend_str}</div>'
 
         # ---- 第一行: SS评分分项 + 技术指标 ----
         detail += '<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:10px">'
@@ -319,7 +333,7 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         sector_html += f'<div class="sector-card" style="cursor:pointer" onclick="filterSector(\'{ss["name"]}\',this,true)">'
         sector_html += f'<div class="sector-name">{ss["name"]}</div>'
         sector_html += f'<div class="sector-num">{ss["count"]}只</div>'
-        sector_html += f'<div>top10%: <b>{ss["top10"]}</b> | top15%: <b>{ss["top15"]}</b></div>'
+        sector_html += f'<div>前30: <b>{ss["top10"]}</b> | 前60: <b>{ss["top15"]}</b></div>'
         sector_html += f'<div class="sector-top3">{top3_str}</div></div>'
     sector_html += '</div></div>'
 
@@ -407,10 +421,10 @@ var arrow=r.getAttribute('data-arrow')||'●';
 var txt=r.textContent.toLowerCase();
 var show=true;
 if(sector!=='all'&&s!==sector)show=false;
-if(rank==='top10'&&rk>=0.1)show=false;
-if(rank==='top15'&&rk>=0.15)show=false;
-if(rank==='top30'&&rk>=0.3)show=false;
-if(rank==='top50'&&rk>=0.5)show=false;
+if(rank==='top10'&&rk>30)show=false;
+if(rank==='top15'&&rk>60)show=false;
+if(rank==='top30'&&rk>130)show=false;
+if(rank==='top50'&&rk>220)show=false;
 if(change==='up'&&ch!=='1')show=false;
 if(change==='down'&&ch!=='0')show=false;
 if(search&&!txt.includes(search))show=false;
@@ -454,8 +468,8 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 <h1><span>SS-ICIR</span> 决策日报</h1>
 <p><b>{today}</b> &nbsp;|&nbsp; {n}只A股 &nbsp;|&nbsp; ICIR截面排名 + SS辅助评分 &nbsp;|&nbsp; 分级止损</p>
 <div class="meta">
-<span>回测: 209笔/61.2%胜率/+5.9%均</span><span>买入: top 15%</span>
-<span>止损: top10%=-12%, 10-20%=-8%, 20-30%=-5%</span>
+<span>回测: 209笔/61.2%胜率/+5.9%均</span><span>买入: 前30</span>
+<span>止损: 前30=-12%, 30-60=-8%, 60-130=-5%</span>
 </div>
 </div>
 <div class="body-pad">
@@ -536,30 +550,40 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
         results[code]["rank_pct"] = rank / n
         results[code]["rank"] = rank + 1
 
-    # ====== 排名变化 ======
-    prev_ranks = load_json(RANK_FILE)
+    # ====== 排名历史（存排名数字） ======
+    prev_ranks = load_json(RANK_FILE)  # {code: {rank_history: [rank1, rank2, ...]}}
     rank_change = {}
+    rank_history = {}  # {code: [最近5日排名]}
     for code, r in results.items():
         prev = prev_ranks.get(code, {})
         prev_rp = prev.get("rank_pct")
+        history = prev.get("history", [])
+        # 更新历史
+        history.append(r["rank"])
+        if len(history) > 5:
+            history = history[-5:]
+        rank_history[code] = history
+
         if prev_rp is not None:
-            delta = prev_rp - r["rank_pct"]
-            if abs(delta) < 0.01: rank_change[code] = "→"
-            elif delta > 0.05: rank_change[code] = "↑↑"
-            elif delta > 0.02: rank_change[code] = "↑"
-            elif delta < -0.05: rank_change[code] = "↓↓"
-            elif delta < -0.02: rank_change[code] = "↓"
+            # 用排名数字的变化
+            prev_rank = prev.get("rank", r["rank"])
+            delta = r["rank"] - prev_rank  # 负=排名上升（好）
+            if delta < -10: rank_change[code] = "↑↑"
+            elif delta < -3: rank_change[code] = "↑"
+            elif delta > 10: rank_change[code] = "↓↓"
+            elif delta > 3: rank_change[code] = "↓"
             else: rank_change[code] = "→"
-        else: rank_change[code] = "●"
-    save_json(RANK_FILE, {c: {"rank_pct": results[c]["rank_pct"], "date": today} for c in results})
+        else:
+            rank_change[code] = "●"
+    save_json(RANK_FILE, {c: {"rank_pct": results[c]["rank_pct"], "rank": results[c]["rank"], "history": rank_history[c], "date": today} for c in results})
 
     # ====== 板块 ======
     sectors = defaultdict(list)
     for r in results.values(): sectors[r["sector"]].append(r)
     sector_stats = []
-    for sec, stocks in sorted(sectors.items(), key=lambda x: -len([s for s in x[1] if s["rank_pct"] < 0.15])):
-        top10 = len([s for s in stocks if s["rank_pct"] < 0.10])
-        top15 = len([s for s in stocks if s["rank_pct"] < 0.15])
+    for sec, stocks in sorted(sectors.items(), key=lambda x: -len([s for s in x[1] if s["rank"] <= BUY_COUNT])):
+        top10 = len([s for s in stocks if s["rank"] <= 30])
+        top15 = len([s for s in stocks if s["rank"] <= 60])
         top3 = sorted(stocks, key=lambda s: s["rank_pct"])[:3]
         sector_stats.append({"name": sec, "count": len(stocks), "top10": top10, "top15": top15,
                              "top3": [(s["code"], s["name"], s["rank_pct"]) for s in top3]})
@@ -568,17 +592,17 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
     signal_history = load_json(HISTORY_FILE)
     new_buys, sell_alerts, holdings, watch_list = [], [], [], []
     rank_risers, rank_fallers = [], []
-    top15 = [c for c in sorted_keys[:max(1, int(n*0.15))]]
 
+    close_out = max(BUY_COUNT, int(n*0.3))  # 卖出阈值：前30%或大于买入线
     for code, r in results.items():
         if code not in signal_history: signal_history[code] = {"buy_dates": [], "alerts": []}
         hist = signal_history[code]
         has_pos = len(hist["buy_dates"]) > 0
         last_buy = hist["buy_dates"][-1] if has_pos else None
 
-        if r["rank_pct"] < 0.15:
+        if r["rank"] <= BUY_COUNT:
             if not has_pos:
-                hist["buy_dates"].append({"date": today, "price": r["price"], "rank_pct": r["rank_pct"]})
+                hist["buy_dates"].append({"date": today, "price": r["price"], "rank_pct": r["rank_pct"], "rank": r["rank"]})
                 new_buys.append(r)
             else:
                 ep = last_buy["price"]; pnl = (r["price"]/ep-1)*100 if ep > 0 else 0
@@ -590,16 +614,16 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
             entry_rank = last_buy.get("rank_pct", 0.15)
             stop = -12 if entry_rank < 0.10 else (-8 if entry_rank < 0.20 else -5)
             tracking = {**r, "entry_date": last_buy["date"], "entry_price": ep, "pnl": round(pnl,1), "days_held": days}
-            if r["rank_pct"] > 0.5 or pnl <= stop:
-                trigger = "排名崩溃" if r["rank_pct"]>0.5 else f"止损({pnl:+.1f}%≤{stop}%)"
+            if r["rank"] > n * 0.5 or pnl <= stop:
+                trigger = "排名崩溃" if r["rank"] > n * 0.5 else f"止损({pnl:+.1f}%≤{stop}%)"
                 hist["alerts"].append({"date":today,"reason":"sell","trigger":trigger})
                 sell_alerts.append({**tracking, "trigger": trigger})
             else:
                 watch_list.append(tracking)
 
         # 排名异动
-        if r["rank_pct"] >= 0.15 and rank_change.get(code) in ("↑↑","↑"): rank_risers.append(r)
-        if r["rank_pct"] < 0.15 and rank_change.get(code) in ("↓↓","↓"): rank_fallers.append(r)
+        if r["rank"] > BUY_COUNT and rank_change.get(code) in ("↑↑","↑"): rank_risers.append(r)
+        if r["rank"] <= BUY_COUNT and rank_change.get(code) in ("↓↓","↓"): rank_fallers.append(r)
 
     for code in signal_history:
         signal_history[code]["buy_dates"] = signal_history[code]["buy_dates"][-3:]
@@ -608,7 +632,7 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
 
     # ====== HTML ======
     html = build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts,
-                      holdings, watch_list, rank_risers, rank_fallers, sector_stats, rank_change)
+                      holdings, watch_list, rank_risers, rank_fallers, sector_stats, rank_change, rank_history)
 
     html_path = os.path.join(output_dir, f"SS-ICIR_{today}.html")
     with open(html_path, "w") as f: f.write(html)
