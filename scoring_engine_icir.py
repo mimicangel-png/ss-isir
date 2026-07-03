@@ -122,12 +122,15 @@ def extract_indicators(klines, idx, extra=None):
     dev_ma20 = (c[-1] / ma20 - 1) * 100 if ma20 else 0
     turnover = extra.get("turnover", 0) if extra else 0
     ret_5d = (c[-1] / c[-6] - 1) * 100 if len(c) >= 6 else 0
+    ret_10d = (c[-1] / c[-11] - 1) * 100 if len(c) >= 11 else 0
+    ret_20d = (c[-1] / c[-21] - 1) * 100 if len(c) >= 21 else 0
     pe = extra.get("pe_ttm", 0) if extra else 0
 
     return {
         "rsi": round(rsi, 1), "vol_ratio": round(vol_ratio, 2),
         "dev_ma20": round(dev_ma20, 1), "turnover": round(turnover, 2),
-        "ret_5d": round(ret_5d, 1), "pe": round(pe, 1),
+        "ret_5d": round(ret_5d, 1), "ret_10d": round(ret_10d, 1), "ret_20d": round(ret_20d, 1),
+        "pe": round(pe, 1),
     }
 
 
@@ -207,14 +210,17 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     <div class="dcard"><div class="dv" style="color:#f59e0b">{len(watch_list)}</div><div class="dl">关注</div></div>
     </div>"""
 
-    # ====== 筛选器 ======
+    # ====== 板块标签 ======
     all_sectors = sorted(sectors.keys())
-    sector_options = '<option value="all">全部板块</option>' + ''.join(
-        f'<option value="{s}">{s} ({len(sectors[s])})</option>' for s in all_sectors)
+    sector_tags = f'<span class="sector-tag active" onclick="filterSector(\'all\',this)">全部 ({n})</span>'
+    for s in all_sectors:
+        sector_tags += f'<span class="sector-tag" onclick="filterSector(\'{s}\',this)">{s} ({len(sectors[s])})</span>'
 
+    # ====== 筛选器 ======
     filters = f"""
     <div class="filters">
-    <select id="sectorFilter" onchange="applyFilters()">{sector_options}</select>
+    <div class="sector-tags">{sector_tags}</div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px">
     <select id="rankFilter" onchange="applyFilters()">
         <option value="all">全部排名</option><option value="top10">top 10%</option>
         <option value="top15">top 15%</option><option value="top30">top 30%</option>
@@ -222,8 +228,8 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     <select id="changeFilter" onchange="applyFilters()">
         <option value="all">全部涨跌</option><option value="up">上涨</option><option value="down">下跌</option></select>
     <input type="text" id="searchBox" placeholder="搜索代码/名称..." oninput="applyFilters()" style="padding:4px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;width:140px">
-    <span class="filter-note">{n}只结果显示</span>
-    </div>"""
+    <span class="filter-note" id="filterCount">{n}只</span>
+    </div></div>"""
 
     # ====== 数据表行 ======
     table_rows = ""
@@ -235,13 +241,16 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         ac = {"↑↑": "#d32f2f", "↑": "#e53935", "→": "#999", "↓": "#388e3c", "↓↓": "#2e7d32", "●": "#1565c0"}.get(arrow, "#999")
         chg_cls = "red" if r["change_pct"] > 0 else "green"
         ret5_cls = "red" if ind.get("ret_5d", 0) > 0 else "green"
+        ret10_cls = "red" if ind.get("ret_10d", 0) > 0 else "green"
+        ret20_cls = "red" if ind.get("ret_20d", 0) > 0 else "green"
         hl = ' class="hl"' if r["rank_pct"] < 0.15 else ""
-
-        # RSI 颜色: 过热红色, 正常灰, 超卖绿
         rsi_v = ind.get("rsi", 50)
         rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#666"))
+        # Store rank_delta for context-aware change display
+        delta = (rank_change.get(code, "●") != "●")
+        prev_rp = r.get("prev_rank_pct", 0)
 
-        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank_pct"]:.3f}" data-change="{1 if r["change_pct"]>0 else 0}">'
+        table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank_pct"]:.3f}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-prevrp="{prev_rp:.4f}" data-code="{r["code"]}" data-name="{r["name"]}">'
         table_rows += f'<td>{r["code"]}</td><td>{r["name"]}</td><td class="sector-cell">{r["sector"]}</td>'
         table_rows += f'<td class="rank-cell"><b>top {r["rank_pct"]:.1%}</b> <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
         table_rows += f'<td>{ss.get("total", "-")}</td>'
@@ -250,6 +259,8 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         table_rows += f'<td><span style="color:{rsi_c};font-weight:600">{rsi_v:.0f}</span></td>'
         table_rows += f'<td>{ind.get("vol_ratio", "-")}</td>'
         table_rows += f'<td class="{ret5_cls}">{ind.get("ret_5d", 0):+.1f}%</td>'
+        table_rows += f'<td class="{ret10_cls}">{ind.get("ret_10d", 0):+.1f}%</td>'
+        table_rows += f'<td class="{ret20_cls}">{ind.get("ret_20d", 0):+.1f}%</td>'
         table_rows += f'<td>{ind.get("dev_ma20", 0):+.1f}%</td>'
         table_rows += f'<td>{ind.get("pe", "-")}</td>'
         table_rows += f'</tr>\n'
@@ -258,25 +269,12 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     sector_html = '<div class="card"><h3>板块热力</h3><div class="sector-grid">'
     for ss in sector_stats:
         top3_str = " ".join(f'{c} {n}' for c, n, _ in ss["top3"])
-        sector_html += f'<div class="sector-card"><div class="sector-name">{ss["name"]}</div>'
+        sector_html += f'<div class="sector-card" style="cursor:pointer" onclick="filterSector(\'{ss["name"]}\',this,true)">'
+        sector_html += f'<div class="sector-name">{ss["name"]}</div>'
         sector_html += f'<div class="sector-num">{ss["count"]}只</div>'
         sector_html += f'<div>top10%: <b>{ss["top10"]}</b> | top15%: <b>{ss["top15"]}</b></div>'
         sector_html += f'<div class="sector-top3">{top3_str}</div></div>'
     sector_html += '</div></div>'
-
-    # ====== 排名异动 ======
-    change_html = ""
-    if rank_risers or rank_fallers:
-        change_html = '<div class="card"><h3>排名异动</h3>'
-        if rank_risers:
-            change_html += '<div style="margin-bottom:6px"><b style="color:#d32f2f">↑ 上升</b> '
-            change_html += ' '.join(f'<span style="font-size:11px;margin-right:4px">{r["code"]}</span>' for r in rank_risers[:12])
-            change_html += '</div>'
-        if rank_fallers:
-            change_html += '<div><b style="color:#2e7d32">↓ 下滑</b> '
-            change_html += ' '.join(f'<span style="font-size:11px;margin-right:4px">{r["code"]}</span>' for r in rank_fallers[:12])
-            change_html += '</div>'
-        change_html += '</div>'
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -304,9 +302,14 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHe
 .dcard{{flex:1;min-width:80px;background:#fff;border-radius:8px;padding:12px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.04)}}
 .dcard .dv{{font-size:22px;font-weight:700}}
 .dcard .dl{{font-size:10px;color:#888;margin-top:2px}}
-.filters{{display:flex;gap:6px;align-items:center;padding:8px 0;flex-wrap:wrap}}
+.filters{{display:flex;gap:6px;align-items:center;padding:8px 0;flex-wrap:wrap;flex-direction:column;align-items:flex-start}}
 .filters select,.filters input{{padding:5px 10px;border:1px solid #d0d0d0;border-radius:6px;font-size:12px;background:#fff}}
 .filter-note{{font-size:11px;color:#999;margin-left:auto}}
+.sector-tags{{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:2px}}
+.sector-tag{{padding:4px 10px;border-radius:14px;font-size:11px;cursor:pointer;background:#f1f5f9;color:#64748b;border:1px solid transparent;transition:all .15s;user-select:none}}
+.sector-tag:hover{{background:#e2e8f0;color:#334155}}
+.sector-tag.active{{background:#1a1a2e;color:#fff;font-weight:600}}
+.change-panel{{padding:8px 0;font-size:11px;min-height:24px}}
 .card{{background:#fff;border-radius:10px;padding:14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.05)}}
 .card h3{{font-size:13px;margin-bottom:8px;color:#333}}
 .sector-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}}
@@ -328,17 +331,27 @@ tr.hl:hover{{background:#fef3c7}}
 .rank-cell{{min-width:70px}}
 </style>
 <script>
+var currentSector='all';
+function filterSector(sector,el,fromCard){{
+currentSector=sector;
+document.querySelectorAll('.sector-tag').forEach(t=>t.classList.remove('active'));
+if(!fromCard&&el)el.classList.add('active');
+else{{var tags=document.querySelectorAll('.sector-tag');tags.forEach(function(t){{if(t.textContent.startsWith(sector.split('(')[0])||(sector==='all'&&t.textContent.startsWith('全部')))t.classList.add('active')}})}}
+applyFilters();
+}}
 function applyFilters(){{
-var sector=document.getElementById('sectorFilter').value;
+var sector=currentSector;
 var rank=document.getElementById('rankFilter').value;
 var change=document.getElementById('changeFilter').value;
 var search=document.getElementById('searchBox').value.toLowerCase();
 var rows=document.querySelectorAll('tbody tr');
 var visible=0;
+var risers=[],fallers=[];
 rows.forEach(function(r){{
 var s=r.getAttribute('data-sector');
 var rk=parseFloat(r.getAttribute('data-rank')||1);
 var ch=r.getAttribute('data-change');
+var arrow=r.getAttribute('data-arrow')||'●';
 var txt=r.textContent.toLowerCase();
 var show=true;
 if(sector!=='all'&&s!==sector)show=false;
@@ -350,9 +363,21 @@ if(change==='up'&&ch!=='1')show=false;
 if(change==='down'&&ch!=='0')show=false;
 if(search&&!txt.includes(search))show=false;
 r.style.display=show?'':'none';
-if(show)visible++;
+if(show){{visible++;
+var code=r.getAttribute('data-code')||'';
+var name=r.getAttribute('data-name')||'';
+if(arrow==='↑↑'||arrow==='↑')risers.push(code+' '+name);
+if(arrow==='↓↓'||arrow==='↓')fallers.push(code+' '+name);
+}}
 }});
 document.getElementById('filterCount').textContent=visible+'/'+rows.length+' 只';
+// Update change panel
+var cp=document.getElementById('changePanel');
+var html='';
+if(risers.length)html+='<b style=color:#d32f2f>↑ 上升:</b> '+risers.slice(0,15).join(' &nbsp;');
+if(risers.length&&fallers.length)html+=' &nbsp;&nbsp; ';
+if(fallers.length)html+='<b style=color:#2e7d32>↓ 下滑:</b> '+fallers.slice(0,15).join(' &nbsp;');
+cp.innerHTML=html||'排名变动不显著';
 }}
 var sc=3,sa=false;
 function sortTable(col){{
@@ -392,10 +417,10 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 <th onclick="sortTable(3)">ICIR排名</th>
 <th onclick="sortTable(4)">SS分</th>
 <th>收盘价</th><th>日涨跌</th>
-<th>RSI</th><th>量比</th><th>5日涨跌</th><th>MA20偏离</th><th>PE</th>
+<th>RSI</th><th>量比</th><th>5日涨跌</th><th>10日涨跌</th><th>20日涨跌</th><th>MA20偏离</th><th>PE</th>
 </tr></thead><tbody>{table_rows}</tbody></table>
 </div></div>
-{change_html}
+<div class="change-panel" id="changePanel"></div>
 {sector_html}
 <div class="card" style="font-size:11px;color:#666;line-height:1.6">
 <b>使用说明</b><br>
