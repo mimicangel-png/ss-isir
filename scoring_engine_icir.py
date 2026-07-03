@@ -278,56 +278,37 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         rsi_v = ind.get("rsi", 50)
         rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#555"))
 
-        # ICIR 因子贡献 TOP 5
-        fv = r.get("factor_values", {})
-        top_icir = []
-        for fn in fv:
-            w = ICIR.get(fn, 0)
-            if w > 0.01 and fv[fn] != 0:
-                top_icir.append((fn, fv[fn], w * fv[fn]))
-        top_icir.sort(key=lambda x: -abs(x[2]))
-        icir_contrib = top_icir[:8]
-
         detail = f'<tr id="{did}" class="detail-row" style="display:none"><td colspan="10" style="padding:12px 18px;background:#f8f9fc;border-bottom:2px solid #e0e0e0;font-size:12px">'
 
-        # ---- 第一行: SS评分 + 技术指标 ----
-        detail += '<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:8px">'
-        detail += f'<div><b style="color:#7c3aed">SS评分</b><br>技术面 <b style="color:#1a1a2e;font-size:14px">{ss.get("tech",50)}</b>'
-        detail += f' &nbsp; 资金面 <b style="color:#1a1a2e;font-size:14px">{ss.get("capital",50)}</b>'
-        detail += f' &nbsp; 信息面 <b style="color:#1a1a2e;font-size:14px">{ss.get("info",50)}</b>'
-        detail += f' &nbsp; <span style="color:#888;font-size:10px">综合 <b>{ss.get("total",50)}</b></span></div>'
+        # ---- 第一行: SS评分分项 + 技术指标 ----
+        detail += '<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:10px">'
+        detail += f'<div><b style="color:#7c3aed">SS评分明细</b><br>技术面 <b style="font-size:15px">{ss.get("tech",50)}</b>'
+        detail += f' &nbsp; 资金面 <b style="font-size:15px">{ss.get("capital",50)}</b>'
+        detail += f' &nbsp; 信息面 <b style="font-size:15px">{ss.get("info",50)}</b>'
+        detail += f' &nbsp; <span style="color:#888;font-size:10px">综合 {ss.get("total",50)} (35%/55%/10%)</span></div>'
         detail += f'<div><b style="color:#1565c0">技术指标</b><br>RSI <b style="color:{rsi_c}">{rsi_v:.0f}</b>'
         detail += f' &nbsp; 量比 <b>{ind.get("vol_ratio","-")}</b>'
         detail += f' &nbsp; MA20偏离 <b>{ind.get("dev_ma20",0):+.1f}%</b>'
-        detail += f' &nbsp; PE <b>{ind.get("pe","-")}</b></div>'
-        detail += '</div>'
+        if ind.get("pe", 0) > 0:
+            detail += f' &nbsp; PE <b>{ind.get("pe", 0):.0f}</b>'
+        detail += '</div></div>'
 
-        # ---- 第二行: SS加减分因子 ----
-        if pos_f or neg_f:
-            if pos_f:
-                detail += '<div style="margin:4px 0"><b style="color:#166534;font-size:11px">🟢 SS加分 </b>'
-                detail += ' '.join(f'<span style="display:inline-block;margin:2px 3px;padding:2px 8px;background:#dcfce7;border-radius:4px;font-size:11px">{f[1]} <b>+{f[2]}</b> <span style="color:#888;font-size:10px">{f[3][:30]}</span></span>' for f in pos_f)
-                detail += '</div>'
-            if neg_f:
-                detail += '<div style="margin:4px 0"><b style="color:#991b1b;font-size:11px">🔴 SS减分 </b>'
-                detail += ' '.join(f'<span style="display:inline-block;margin:2px 3px;padding:2px 8px;background:#fee2e2;border-radius:4px;font-size:11px">{f[1]} <b>{f[2]}</b> <span style="color:#888;font-size:10px">{f[3][:30]}</span></span>' for f in neg_f)
-                detail += '</div>'
-
-        # ---- 第三行: ICIR因子贡献TOP 8 ----
-        if icir_contrib:
-            detail += '<div style="margin:8px 0 4px"><b style="color:#7c3aed;font-size:11px">🧬 ICIR因子贡献 TOP 8</b> <span style="color:#888;font-size:10px">(截面z-score × ICIR权重)</span></div>'
-            detail += '<div style="display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px">'
-            for fn, raw_val, contrib in icir_contrib:
-                color = "#d32f2f" if contrib > 0 else "#2e7d32"
-                weight = ICIR.get(fn, 0)
-                detail += f'<span style="white-space:nowrap"><b>{fn}</b> '
-                detail += f'<span style="color:#888">z={raw_val:.2f}</span> '
-                detail += f'<span style="color:#888;font-size:10px">w={weight:.3f}</span> '
-                detail += f'<span style="color:{color};font-weight:600">{contrib:+.3f}</span></span>'
+        # ---- 第二行: SS加减分因子明细 ----
+        if pos_f:
+            detail += '<div style="margin:6px 0"><b style="color:#166534;font-size:11px">🟢 加分项</b></div>'
+            detail += '<div style="display:flex;flex-wrap:wrap;gap:4px 6px">'
+            for f in pos_f:
+                detail += f'<span style="display:inline-block;padding:3px 10px;background:#dcfce7;border-radius:5px;font-size:11px">{f[1]} <b style="color:#166534">+{f[2]}</b> <span style="color:#888;font-size:10px">{f[3]}</span></span>'
             detail += '</div>'
+        if neg_f:
+            detail += '<div style="margin:6px 0"><b style="color:#991b1b;font-size:11px">🔴 减分项</b></div>'
+            detail += '<div style="display:flex;flex-wrap:wrap;gap:4px 6px">'
+            for f in neg_f:
+                detail += f'<span style="display:inline-block;padding:3px 10px;background:#fee2e2;border-radius:5px;font-size:11px">{f[1]} <b style="color:#991b1b">{f[2]}</b> <span style="color:#888;font-size:10px">{f[3]}</span></span>'
+            detail += '</div>'
+        if not pos_f and not neg_f:
+            detail += '<div style="color:#999;font-size:11px;margin-top:4px">无显著加减分因子触发（中性区间）</div>'
 
-        if not pos_f and not neg_f and not icir_contrib:
-            detail += '<div style="color:#999">无显著信号</div>'
         detail += '</td></tr>'
         table_rows += detail + '\n'
 
