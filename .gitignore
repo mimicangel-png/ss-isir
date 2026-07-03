@@ -1,0 +1,9 @@
+.env
+output/*.db
+output/ss_score_history.json
+output/_cache_*.json
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
