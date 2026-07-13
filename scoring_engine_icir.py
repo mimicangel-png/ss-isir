@@ -12,7 +12,7 @@ ICIR 排名 + SS 评分双列 + 关键指标 + 板块筛选 + 信号追踪
   - 信号面板: 🟢新买入 🔴触发卖出 ✅持仓 🟡关注
 """
 
-import sys, os, json, math
+import sys, os, json, math, time
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -33,11 +33,11 @@ _load_env()
 from stock_db import StockDB
 _db = StockDB()
 from v11.factor_engine import compute_all_factors, FACTOR_NAMES, calc_ma, calc_rsi, calc_ema
-from scoring_engine import get_theme
+from sector_map import get_theme
 
-# ====== ICIR 权重 ======
+# ====== ICIR 权重 (SS-ICIR-GLM: mfi/pct_52w 取反, 基于 GLM 方向矛盾诊断) ======
 ICIR_W = {
-    "turnover_z": 0.451, "log_mcap": 0.162, "mfi": 0.153, "pct_52w": 0.091,
+    "turnover_z": 0.451, "log_mcap": 0.162, "mfi": -0.153, "pct_52w": -0.091,
     "pe_percentile": 0.078, "pb_percentile": 0.078, "gap_open": 0.072,
     "max_dd_20d": 0.052, "ma_trend": 0.030, "rsi_signal": 0.028,
     "macd_signal": 0.026, "cmf": 0.025, "vwap_premium": 0.022,
@@ -54,6 +54,7 @@ ICIR = {k: v/_total for k, v in ICIR_W.items()}
 
 HISTORY_FILE = os.path.join(PROJECT_DIR, "output", "icir_signal_history.json")
 RANK_FILE = os.path.join(PROJECT_DIR, "output", "icir_rank_history.json")
+SS_HISTORY_FILE = os.path.join(PROJECT_DIR, "output", "icir_ss_history.json")
 BUY_COUNT = 30  # 买入阈值：前30名
 
 def load_json(path):
@@ -179,7 +180,8 @@ def send_email(html_path, today, recipient="914110627@qq.com"):
 
 # ========== HTML 报告 ==========
 def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, holdings, watch_list,
-               rank_risers, rank_fallers, sector_stats, rank_change, rank_history):
+               rank_risers, rank_fallers, sector_stats, rank_change, rank_history,
+               rank_5d_change, ss_5d_change, kline_date="", extra_date="", data_fresh=True, missing_count=0):
     """构建完整 HTML 报告"""
 
     n = len(results)
@@ -187,17 +189,41 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
     top10_cnt = len(sorted_keys[:max(1,int(n*0.1))])
     top15_cnt = len(sorted_keys[:max(1,int(n*0.15))])
 
+    # 数据状态徽章
+    if data_fresh:
+        data_status_badge = '<span style="color:#2e7d32">✅ 数据完整</span>'
+    else:
+        data_status_badge = f'<span style="color:#d32f2f">⚠️ 缺{missing_count}只</span>'
+
+    # ====== 构建 code -> 信号状态映射 ======
+    signal_map = {}  # {code: {"type": "buy"/"sell"/"hold"/"watch", "info": {...}}}
+    for r in new_buys:
+        signal_map[r["code"]] = {"type": "buy", "label": "🟢 新买入", "color": "#166534", "bg": "#dcfce7"}
+    for r in holdings:
+        signal_map[r["code"]] = {"type": "hold", "label": "✅ 持仓中", "color": "#0c447c", "bg": "#e6f1fb",
+                                  "pnl": r.get("pnl", 0), "days": r.get("days_held", 0),
+                                  "entry": r.get("entry_price", 0)}
+    for r in sell_alerts:
+        signal_map[r["code"]] = {"type": "sell", "label": "🔴 触发卖出", "color": "#991b1b", "bg": "#fee2e2",
+                                  "trigger": r.get("trigger", ""), "pnl": r.get("pnl", 0),
+                                  "days": r.get("days_held", 0), "entry": r.get("entry_price", 0)}
+    for r in watch_list:
+        signal_map[r["code"]] = {"type": "watch", "label": "🟡 关注", "color": "#854f0b", "bg": "#fef3c7",
+                                  "pnl": r.get("pnl", 0), "days": r.get("days_held", 0),
+                                  "entry": r.get("entry_price", 0)}
+
     # ====== 信号面板 ======
     signal_html = ""
     panels = [("🔴 触发卖出", "signal-red", sell_alerts, True),
               ("🟢 新买入信号", "signal-green", new_buys, False),
               ("✅ 持仓中", "signal-blue", holdings, False),
               ("🟡 关注列表", "signal-yellow", watch_list, False)]
-    for title, cls, items, is_sell in panels:
+    for idx, (title, cls, items, is_sell) in enumerate(panels):
         if not items: continue
+        pid = f"sig_{idx}"
         signal_html += f'<div class="signal {cls}"><span class="sig-title">{title} · {len(items)}</span>'
         signal_html += '<div class="sig-items">'
-        for r in items[:8]:
+        for i, r in enumerate(items):
             pnl = ""; pnl_cls = ""
             if is_sell or "entry_price" in r:
                 ep = r.get("entry_price", r.get("price", 0))
@@ -210,9 +236,12 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
             if is_sell: detail = f' <span class="dim">{r.get("trigger","")}</span>'
             elif "entry_date" in r: detail = f' <span class="dim">@{r["price"]:.2f}</span>'
             else: detail = f' <span class="dim">{r["sector"]}</span> <span class="{"red" if r["change_pct"]>0 else "green"}">{r["change_pct"]:+.1f}%</span>'
-            signal_html += f'<span class="sig-item"><b>{r["code"]} {r["name"]}</b>{detail}{pnl_str}</span>'
+            if i >= 8:
+                signal_html += f'<span class="sig-item sig-extra" style="display:none"><b>{r["code"]} {r["name"]}</b>{detail}{pnl_str}</span>'
+            else:
+                signal_html += f'<span class="sig-item"><b>{r["code"]} {r["name"]}</b>{detail}{pnl_str}</span>'
         if len(items) > 8:
-            signal_html += f'<span class="sig-item dim">+{len(items)-8} 更多</span>'
+            signal_html += f'<span class="sig-item dim" style="cursor:pointer;text-decoration:underline" onclick="toggleMore(\'{pid}\', this)">+{len(items)-8} 更多</span>'
         signal_html += '</div></div>'
 
     # ====== 仪表盘 ======
@@ -261,16 +290,42 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         ret20_cls = "red" if ind.get("ret_20d", 0) > 0 else "green"
         hl = ' class="hl"' if r["rank"] <= BUY_COUNT else ""
 
+        # 5日排名变化
+        r5d = rank_5d_change.get(code, 0)
+        if r5d < 0:
+            r5d_str = f' <span style="font-size:9px;color:#d32f2f">↑{-r5d}</span>'
+        elif r5d > 0:
+            r5d_str = f' <span style="font-size:9px;color:#2e7d32">↓{r5d}</span>'
+        else:
+            r5d_str = ''
+
+        # 5日SS变化
+        s5d = ss_5d_change.get(code, 0)
+        if s5d > 0:
+            s5d_str = f' <span style="font-size:9px;color:#d32f2f">↑{s5d}</span>'
+        elif s5d < 0:
+            s5d_str = f' <span style="font-size:9px;color:#2e7d32">↓{-s5d}</span>'
+        else:
+            s5d_str = ''
+
+        # RSI color
+        rsi_v = ind.get("rsi", 50)
+        rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#555"))
+
         did = f"d{code}"
         table_rows += f'<tr{hl} data-sector="{r["sector"]}" data-rank="{r["rank"]}" data-change="{1 if r["change_pct"]>0 else 0}" data-arrow="{arrow}" data-code="{r["code"]}" data-name="{r["name"]}" style="cursor:pointer" onclick="toggleDetail(\'{did}\')">'
         table_rows += f'<td>{r["code"]}</td><td>{r["name"]}</td><td class="sector-cell">{r["sector"]}</td>'
-        table_rows += f'<td class="rank-cell"><b># {r["rank"]}</b> <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
-        table_rows += f'<td><b>{ss.get("total", "-")}</b></td>'
+        table_rows += f'<td class="rank-cell"><b># {r["rank"]}</b>{r5d_str} <span style="font-size:10px;color:{ac}">{arrow}</span></td>'
+        table_rows += f'<td><b>{ss.get("total", "-")}</b>{s5d_str}</td>'
         table_rows += f'<td>{r["price"]:.2f}</td>'
         table_rows += f'<td class="{chg_cls}">{r["change_pct"]:+.2f}%</td>'
         table_rows += f'<td class="{ret5_cls}">{ind.get("ret_5d", 0):+.1f}%</td>'
         table_rows += f'<td class="{ret10_cls}">{ind.get("ret_10d", 0):+.1f}%</td>'
         table_rows += f'<td class="{ret20_cls}">{ind.get("ret_20d", 0):+.1f}%</td>'
+        table_rows += f'<td><span style="color:{rsi_c};font-weight:600">{rsi_v:.0f}</span></td>'
+        table_rows += f'<td>{ind.get("vol_ratio", "-")}</td>'
+        table_rows += f'<td>{ind.get("dev_ma20", 0):+.1f}%</td>'
+        table_rows += f'<td>{"{:.0f}".format(ind.get("pe", 0)) if ind.get("pe", 0) > 0 else "-"}</td>'
         table_rows += f'</tr>\n'
 
         # 详情行
@@ -280,7 +335,24 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
         rsi_v = ind.get("rsi", 50)
         rsi_c = "#d32f2f" if rsi_v > 80 else ("#e65100" if rsi_v > 70 else ("#2e7d32" if rsi_v < 30 else "#555"))
 
-        detail = f'<tr id="{did}" class="detail-row" style="display:none"><td colspan="10" style="padding:12px 18px;background:#f8f9fc;border-bottom:2px solid #e0e0e0;font-size:12px">'
+        detail = f'<tr id="{did}" class="detail-row" style="display:none"><td colspan="14" style="padding:12px 18px;background:#f8f9fc;border-bottom:2px solid #e0e0e0;font-size:12px">'
+
+        # ---- 信号状态标记 ----
+        sig = signal_map.get(code)
+        if sig:
+            sig_html = f'<div style="margin-bottom:10px;padding:6px 12px;background:{sig["bg"]};border-radius:6px;display:inline-block">'
+            sig_html += f'<span style="font-weight:700;color:{sig["color"]};font-size:13px">{sig["label"]}</span>'
+            if sig["type"] in ("hold", "watch", "sell"):
+                pnl = sig.get("pnl", 0)
+                pnl_cls = "#d32f2f" if pnl > 0 else "#2e7d32"
+                sig_html += f' <span style="color:#888;font-size:11px">入场 ¥{sig.get("entry",0):.2f} · 持有{sig.get("days",0)}天 · 浮盈</span>'
+                sig_html += f' <span style="color:{pnl_cls};font-weight:600">{pnl:+.1f}%</span>'
+            if sig["type"] == "sell":
+                sig_html += f' <span style="color:#991b1b;font-size:11px;font-weight:600">⚠ {sig.get("trigger","")}</span>'
+            if sig["type"] == "buy":
+                sig_html += f' <span style="color:#888;font-size:11px">今日新进入 top{BUY_COUNT}</span>'
+            sig_html += '</div><br>'
+            detail += sig_html
 
         # ---- 排名趋势 ----
         rh = rank_history.get(code, [r["rank"]])
@@ -293,6 +365,11 @@ def build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts, hold
                     trend_parts.append(f'<span style="color:#999">#{rk}</span>')
             trend_str = ' → '.join(trend_parts)
             detail += f'<div style="margin-bottom:10px;font-size:12px"><b>📈 近5日排名</b> {trend_str}</div>'
+
+        # SS 5日趋势
+        r5dc = rank_5d_change.get(code, 0)
+        s5dc = ss_5d_change.get(code, 0)
+        detail += f'<div style="margin-bottom:10px;font-size:12px"><b>📊 5日变化</b> 排名<span style="color:{"#d32f2f" if r5dc<0 else "#2e7d32" if r5dc>0 else "#999"};font-weight:600">{r5dc:+d}</span> &nbsp; SS分<span style="color:{"#d32f2f" if s5dc>0 else "#2e7d32" if s5dc<0 else "#999"};font-weight:600">{s5dc:+d}</span></div>'
 
         # ---- 第一行: SS评分分项 + 技术指标 ----
         detail += '<div style="display:flex;gap:32px;flex-wrap:wrap;margin-bottom:10px">'
@@ -394,6 +471,13 @@ tr.hl:hover{{background:#fef3c7}}
 </style>
 <script>
 var currentSector='all';
+function toggleMore(pid, el){{
+var parent=el.parentElement;
+var extras=parent.querySelectorAll('.sig-extra');
+var hidden=extras[0]&&extras[0].style.display==='none';
+extras.forEach(function(e){{e.style.display=hidden?'':'none'}});
+el.textContent=hidden?('+'+extras.length+' 收起'):'+'+extras.length+' 更多';
+}}
 function toggleDetail(id){{
 var el=document.getElementById(id);
 if(el)el.style.display=el.style.display==='none'?'':'none';
@@ -468,6 +552,7 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 <h1><span>SS-ICIR</span> 决策日报</h1>
 <p><b>{today}</b> &nbsp;|&nbsp; {n}只A股 &nbsp;|&nbsp; ICIR截面排名 + SS辅助评分 &nbsp;|&nbsp; 分级止损</p>
 <div class="meta">
+<span>K线数据: <b>{kline_date}</b></span><span>行情数据: <b>{extra_date}</b></span>{data_status_badge}
 <span>回测: 209笔/61.2%胜率/+5.9%均</span><span>买入: 前30</span>
 <span>止损: 前30=-12%, 30-60=-8%, 60-130=-5%</span>
 </div>
@@ -483,7 +568,8 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 <th onclick="sortTable(3)">ICIR排名</th>
 <th onclick="sortTable(4)">SS分</th>
 <th>收盘价</th><th>日涨跌</th>
-<th>收盘价</th><th>日涨跌</th><th>5日涨跌</th><th>10日涨跌</th><th>20日涨跌</th>
+<th>5日涨跌</th><th>10日涨跌</th><th>20日涨跌</th>
+<th>RSI</th><th>量比</th><th>MA20偏离</th><th>PE</th>
 </tr></thead><tbody>{table_rows}</tbody></table>
 </div></div>
 <div class="change-panel" id="changePanel"></div>
@@ -497,7 +583,7 @@ rows.forEach(function(r){{tbody.appendChild(r)}})
 · <b>MA20偏离</b>: &gt;+10%远离均线 · &lt;-10%超跌<br>
 · 筛选器支持板块/排名/涨跌/搜索组合筛选
 </div>
-<div class="footer">SS-ICIR v3.0 | ICIR权重标定 | 自动生成 {datetime.now().strftime('%H:%M')}</div>
+<div class="footer">SS-ICIR-GLM | K线:{kline_date} 行情:{extra_date} | mfi/pct_52w 取反 + 全量因子计算 | 自动生成 {datetime.now().strftime('%H:%M')}</div>
 </div></div></body></html>"""
     return html
 
@@ -510,22 +596,102 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"╔══════════════════════════════════╗")
-    print(f"║  SS-ICIR v3.0 决策日报 [{today}]  ║")
+    print(f"║  SS-ICIR-GLM 决策日报 [{today}]  ║")
     print(f"╚══════════════════════════════════╝")
 
     with open(codes_file) as f: codes = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+
+    # ====== 数据完整性预检 ======
+    fresh = _db.check_data_freshness(codes)
+    kline_date = fresh["kline_latest"]
+    extra_date = fresh["extra_latest"]
+    expected_td = fresh["expected_td"]
+    n_missing_k = len(fresh["missing_klines"])
+    n_missing_e = len(fresh["missing_extra"])
+
+    print(f"  📅 数据日期: K线={kline_date} | 行情={extra_date} | 预期交易日={expected_td}")
+    print(f"  📊 K线分布: {fresh['kline_counts']}")
+    if fresh["fresh"]:
+        print(f"  ✅ 数据完整性: {fresh['total_codes']}只全部最新")
+    else:
+        print(f"  ⚠️ 数据不完整: 缺K线{n_missing_k}只 | 缺行情{n_missing_e}只")
+        if n_missing_k > 0 and n_missing_k <= 20:
+            print(f"     缺K线: {fresh['missing_klines']}")
+        if n_missing_e > 0 and n_missing_e <= 20:
+            print(f"     缺行情: {fresh['missing_extra']}")
+        if kline_date < expected_td:
+            print(f"  🔄 K线数据过期({kline_date} < {expected_td})，正在增量更新...")
+
     klines = _db.get_klines(codes, days=130)
-    extra = _db.get_extra_info(codes)
+    extra = _db.get_extra_info(codes, force_refresh=True)
     for c in extra: extra[c]["_sector"] = get_theme(c)
 
-    # ====== ICIR + SS + 指标 ======
-    results = {}
-    raw = {}
+    # ====== 数据完整性自动重试（最多5轮）======
+    MAX_RETRY = 5
+    prev_missing = set()
+    suspended = set()
+
+    for round_num in range(1, MAX_RETRY + 1):
+        fresh2 = _db.check_data_freshness(codes)
+        kline_date = fresh2["kline_latest"]
+        extra_date = fresh2["extra_latest"]
+        n_missing_k = len(fresh2["missing_klines"])
+        n_missing_e = len(fresh2["missing_extra"])
+        data_fresh = fresh2["fresh"]
+
+        if data_fresh:
+            print(f"  ✅ 数据完整: {fresh2['total_codes']}只全部最新 (第{round_num}轮检查)")
+            break
+
+        cur_missing = set(fresh2["missing_klines"]) | set(fresh2["missing_extra"])
+
+        # 连续两轮缺失列表完全相同 → 判定停牌，不再重试
+        if cur_missing == prev_missing and round_num > 1:
+            suspended = cur_missing
+            print(f"  ⏸️ 第{round_num}轮: 缺失列表无变化({len(cur_missing)}只)，判定停牌，停止重试")
+            break
+
+        prev_missing = cur_missing
+
+        if round_num < MAX_RETRY:
+            all_missing = list(set(fresh2["missing_klines"]) | set(fresh2["missing_extra"]))
+            print(f"  🔄 第{round_num}/{MAX_RETRY}轮重试: 补拉{len(all_missing)}只 (缺K线{n_missing_k} 行情{n_missing_e})")
+            _db.force_refresh(all_missing)
+            time.sleep(2)
+        else:
+            suspended = cur_missing
+            print(f"  ⚠️ 达到最大重试次数({MAX_RETRY}轮)，仍缺{len(cur_missing)}只")
+
+    # 最终状态
+    fresh_final = _db.check_data_freshness(codes)
+    kline_date = fresh_final["kline_latest"]
+    extra_date = fresh_final["extra_latest"]
+    n_missing_k = len(fresh_final["missing_klines"])
+    n_missing_e = len(fresh_final["missing_extra"])
+    data_fresh = fresh_final["fresh"]
+
+    if suspended:
+        suspended = sorted(suspended)
+        print(f"  ⏸️ 疑似停牌({len(suspended)}只): {suspended[:10]}{'...' if len(suspended)>10 else ''}")
+
+    # ====== ICIR + SS + 指标 (v4.0: 全量一次性算因子, 截面标准化生效) ======
+    # 构建当日全量数据池
+    pool_klines = {}; pool_extra = {}
     for code in codes:
         kl = klines.get(code)
         if not kl or len(kl) < 60: continue
-        ex = extra.get(code, {})
-        fv = compute_all_factors({code: kl}, {code: ex}, today_str=today).get(code, {})
+        pool_klines[code] = kl
+        pool_extra[code] = extra.get(code, {})
+
+    # 一次性计算全股票池因子 (截面标准化需要截面数据)
+    all_factors = compute_all_factors(pool_klines, pool_extra, today_str=today)
+
+    results = {}
+    raw = {}
+    for code in pool_klines:
+        kl = pool_klines[code]
+        ex = pool_extra.get(code, {})
+        fv = all_factors.get(code, {})
         if not fv: continue
 
         icir_score = sum(ICIR.get(fn, 0.01) * fv.get(fn, 0) for fn in FACTOR_NAMES)
@@ -540,6 +706,7 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
                 "turnover_z","log_mcap","mfi","pct_52w","pe_percentile","pb_percentile",
                 "gap_open","ma_trend","rsi_signal","macd_signal","cmf","vwap_premium",
                 "event_score","main_flow_5d","main_flow_20d","ret_5d","ret_20d",
+                "volatility_20d",
             ]},
         }
         raw[code] = icir_score
@@ -550,22 +717,42 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
         results[code]["rank_pct"] = rank / n
         results[code]["rank"] = rank + 1
 
-    # ====== 排名历史（存排名数字） ======
+    # ====== 排名历史 + 5日变化 ======
     prev_ranks = load_json(RANK_FILE)  # {code: {rank_history: [rank1, rank2, ...]}}
+    prev_ss = load_json(SS_HISTORY_FILE)  # {code: {ss_history: [ss1, ss2, ...]}}
     rank_change = {}
     rank_history = {}  # {code: [最近5日排名]}
+    rank_5d_change = {}  # {code: 5日排名变化 (负=上升=好)}
+    ss_5d_change = {}  # {code: 5日SS变化 (正=上升=好)}
     for code, r in results.items():
         prev = prev_ranks.get(code, {})
-        prev_rp = prev.get("rank_pct")
+        prev_s = prev_ss.get(code, {})
+        ss_now = r["ss_score"].get("total", 50)
+
+        # --- 排名历史 ---
         history = prev.get("history", [])
-        # 更新历史
         history.append(r["rank"])
         if len(history) > 5:
             history = history[-5:]
         rank_history[code] = history
+        if len(history) >= 2:
+            rank_5d_change[code] = r["rank"] - history[0]  # 负=排名上升
+        else:
+            rank_5d_change[code] = 0
 
+        # --- SS历史 ---
+        ss_hist = prev_s.get("history", [])
+        ss_hist.append(ss_now)
+        if len(ss_hist) > 5:
+            ss_hist = ss_hist[-5:]
+        if len(ss_hist) >= 2:
+            ss_5d_change[code] = ss_now - ss_hist[0]  # 正=SS分上升
+        else:
+            ss_5d_change[code] = 0
+
+        # --- 日间排名箭头 ---
+        prev_rp = prev.get("rank_pct")
         if prev_rp is not None:
-            # 用排名数字的变化
             prev_rank = prev.get("rank", r["rank"])
             delta = r["rank"] - prev_rank  # 负=排名上升（好）
             if delta < -10: rank_change[code] = "↑↑"
@@ -575,7 +762,12 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
             else: rank_change[code] = "→"
         else:
             rank_change[code] = "●"
+
+        # 保存SS历史
+        prev_ss[code] = {"history": ss_hist, "date": today}
+
     save_json(RANK_FILE, {c: {"rank_pct": results[c]["rank_pct"], "rank": results[c]["rank"], "history": rank_history[c], "date": today} for c in results})
+    save_json(SS_HISTORY_FILE, prev_ss)
 
     # ====== 板块 ======
     sectors = defaultdict(list)
@@ -632,20 +824,24 @@ def run_daily(codes_file=None, output_dir=None, recipient=None):
 
     # ====== HTML ======
     html = build_html(today, results, sorted_keys, sectors, new_buys, sell_alerts,
-                      holdings, watch_list, rank_risers, rank_fallers, sector_stats, rank_change, rank_history)
+                      holdings, watch_list, rank_risers, rank_fallers, sector_stats, rank_change, rank_history,
+                      rank_5d_change, ss_5d_change,
+                      kline_date=kline_date, extra_date=extra_date,
+                      data_fresh=data_fresh, missing_count=n_missing_k+n_missing_e)
 
     html_path = os.path.join(output_dir, f"SS-ICIR_{today}.html")
     with open(html_path, "w") as f: f.write(html)
 
     json_path = os.path.join(output_dir, f"SS-ICIR_{today}.json")
     with open(json_path, "w") as f:
-        json.dump({"date": today, "model": "SS-ICIR v3.0", "total": n,
+        json.dump({"date": today, "model": "SS-ICIR-GLM", "total": n,
+                   "kline_date": kline_date, "extra_date": extra_date, "data_fresh": data_fresh,
                    "new_buys": len(new_buys), "sell_alerts": len(sell_alerts),
                    "results": [results[c] for c in sorted_keys]}, f, ensure_ascii=False, indent=2)
 
-    if os.environ.get("SMTP_USER"): send_email(html_path, today, recipient)
+    if os.environ.get("SMTP_USER") and recipient: send_email(html_path, today, recipient)
 
-    print(f"  📊 {n}只 | 🟢{len(new_buys)} 🔴{len(sell_alerts)} ✅{len(holdings)} 🟡{len(watch_list)}")
+    print(f"  📊 {n}只 | K线:{kline_date} 行情:{extra_date} | 🟢{len(new_buys)} 🔴{len(sell_alerts)} ✅{len(holdings)} 🟡{len(watch_list)}")
     return results
 
 
